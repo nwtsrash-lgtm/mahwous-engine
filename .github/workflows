@@ -1,1 +1,146 @@
+name: "✦ محرك مهووس v10.0 — مقارنة + توليد أوصاف"
+
+# ════════════════════════════════════════════════════════════════
+# متى يُشغَّل؟
+# ════════════════════════════════════════════════════════════════
+on:
+  # تشغيل يدوي من GitHub UI
+  workflow_dispatch:
+    inputs:
+      use_llm:
+        description: "🤖 توليد الأوصاف بالذكاء الصناعي؟"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      max_products:
+        description: "حد أقصى للمنتجات (0 = بلا حد)"
+        required: false
+        default: "0"
+        type: string
+      describe_only:
+        description: "استئناف توليد الأوصاف فقط (بدون مقارنة)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+  # تشغيل تلقائي عند رفع ملفات جديدة
+  push:
+    branches: [main]
+    paths:
+      - "input/store/**"
+      - "input/competitors/**"
+
+  # جدول أسبوعي كل يوم أحد 3:00 صباحاً (توقيت السعودية = UTC+3)
+  schedule:
+    - cron: "0 0 * * 0"   # يوم الأحد 3:00 ص توقيت السعودية
+
+
+# ════════════════════════════════════════════════════════════════
+# الإعدادات المشتركة
+# ════════════════════════════════════════════════════════════════
+env:
+  PYTHON_VERSION: "3.11"
+
+
+# ════════════════════════════════════════════════════════════════
+# الوظيفة الرئيسية
+# ════════════════════════════════════════════════════════════════
+jobs:
+  mahwous-engine:
+    name: "⚙️ تشغيل المحرك"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # ── 1. سحب الكود ─────────────────────────────────────────
+      - name: "📥 سحب الكود"
+        uses: actions/checkout@v4
+
+      # ── 2. استعادة Artifacts السابقة (للاستئناف) ─────────────
+      - name: "🔄 استعادة checkpoint السابق (إن وجد)"
+        uses: actions/cache@v4
+        with:
+          path: output/.checkpoint.json
+          key: mahwous-checkpoint-${{ github.ref_name }}
+          restore-keys: mahwous-checkpoint-
+
+      # ── 3. إعداد Python ───────────────────────────────────────
+      - name: "🐍 إعداد Python ${{ env.PYTHON_VERSION }}"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      # ── 4. تثبيت المكتبات ─────────────────────────────────────
+      - name: "📦 تثبيت المكتبات"
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── 5. التحقق من الملفات ──────────────────────────────────
+      - name: "📋 التحقق من ملفات الإدخال"
+        run: |
+          echo "=== ملفات المتجر ==="
+          ls -lh input/store/ || echo "⚠️ مجلد المتجر فارغ"
+          echo ""
+          echo "=== ملفات المنافسين ==="
+          ls -lh input/competitors/ || echo "⚠️ مجلد المنافسين فارغ"
+          echo ""
+          echo "=== ملفات الماركات ==="
+          ls -lh input/brands/ || echo "ℹ️ لا يوجد ملف ماركات"
+
+      # ── 6. تشغيل المحرك ───────────────────────────────────────
+      - name: "🚀 تشغيل محرك مهووس"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          USE_LLM: ${{ github.event.inputs.use_llm || 'true' }}
+          MAX_PRODUCTS: ${{ github.event.inputs.max_products || '0' }}
+          DESCRIBE_ONLY: ${{ github.event.inputs.describe_only || 'false' }}
+        run: |
+          python run_engine.py
+
+      # ── 7. حفظ checkpoint للاستئناف ───────────────────────────
+      - name: "💾 حفظ checkpoint"
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: output/.checkpoint.json
+          key: mahwous-checkpoint-${{ github.ref_name }}-${{ github.run_id }}
+
+      # ── 8. رفع النتائج كـ Artifact ────────────────────────────
+      - name: "📤 رفع النتائج"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "mahwous-results-${{ github.run_number }}"
+          path: |
+            output/
+            !output/.checkpoint.json
+          retention-days: 90
+          if-no-files-found: warn
+
+      # ── 9. ملخص في GitHub UI ──────────────────────────────────
+      - name: "📊 عرض الملخص"
+        if: always()
+        run: |
+          if [ -f output/SUMMARY.md ]; then
+            cat output/SUMMARY.md >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📥 ملفات النتائج" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          ls output/*.csv 2>/dev/null | while read f; do
+            size=$(du -sh "$f" | cut -f1)
+            name=$(basename "$f")
+            echo "- \`$name\` ($size)" >> $GITHUB_STEP_SUMMARY
+          done || echo "لا توجد ملفات CSV" >> $GITHUB_STEP_SUMMARY
+
+      # ── 10. إشعار فشل ─────────────────────────────────────────
+      - name: "🔔 إشعار فشل"
+        if: failure()
+        run: |
+          echo "❌ فشل المحرك! راجع سجلات الخطوات أعلاه." >> $GITHUB_STEP_SUMMARY
 
